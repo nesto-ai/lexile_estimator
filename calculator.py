@@ -9,8 +9,11 @@ from typing import Any
 import spacy
 
 from .config import (
+    DEFAULT_REF_DATA_DIR,
+    DEFAULT_TRAINING_FEATURES,
     LEVEL_ORDER,
     MODEL_VERSION,
+    SEGMENT_BOUNDARY_MARGIN,
     TO_CONTENT_RANGES,
     TO_GLOBAL_OFFSET,
     TO_LEVEL_OFFSETS,
@@ -36,11 +39,8 @@ class LevelCandidate:
 class LexileResult:
     model_lexile: float
     to_calibrated_lexile: float
-    model_population: str
-    model_name: str
     top_level: str
     top_segment: str
-    calibration_mode: str
     candidates: list[LevelCandidate]
     feature_summary: dict[str, Any]
     warnings: list[str]
@@ -58,13 +58,16 @@ def distance_to_range(value: float, low: float, high: float) -> float:
     return low - value if value < low else value - high
 
 
-def segment_in_range(value: float, low: float, high: float) -> str:
-    width = high - low
-    if value <= low + width / 3.0:
+def segment_for_level(value: float, low: float, high: float) -> str:
+    if value < low:
         return "low"
-    if value <= low + 2.0 * width / 3.0:
-        return "mid"
-    return "top"
+    if value > high:
+        return "top"
+    if value - low <= SEGMENT_BOUNDARY_MARGIN:
+        return "low"
+    if high - value <= SEGMENT_BOUNDARY_MARGIN:
+        return "top"
+    return "core"
 
 
 def position_in_range(value: float, low: float, high: float) -> str:
@@ -86,7 +89,7 @@ def level_candidates(lexile: float) -> list[LevelCandidate]:
                 range_low=level_range.low,
                 range_high=level_range.high,
                 lexile=round(lexile, 1),
-                segment=segment_in_range(lexile, level_range.low, level_range.high),
+                segment=segment_for_level(lexile, level_range.low, level_range.high),
                 position=position_in_range(lexile, level_range.low, level_range.high),
                 distance_to_range=round(distance, 1),
                 midpoint_distance=round(abs(lexile - level_range.midpoint), 1),
@@ -125,18 +128,30 @@ class LexileCalculator:
     @classmethod
     def from_project(
         cls,
-        project_root: str | Path = ".",
+        project_root: str | Path | None = None,
         *,
+        ref_data_dir: str | Path | None = None,
         data_dir: str | Path | None = None,
         training_features: str | Path | None = None,
         spacy_model: str = "en_core_web_sm",
     ) -> "LexileCalculator":
-        root = Path(project_root).resolve()
-        data_path = Path(data_dir).resolve() if data_dir is not None else root / "data"
+        # project_root/data_dir are accepted for older local scripts; defaults
+        # now point to package-local CSV resources.
+        root = Path(project_root).resolve() if project_root is not None else None
+
+        def resolve_path(path_value: str | Path) -> Path:
+            path = Path(path_value)
+            if root is not None and not path.is_absolute():
+                return (root / path).resolve()
+            return path.resolve()
+
+        if ref_data_dir is None and data_dir is not None:
+            ref_data_dir = data_dir
+        data_path = resolve_path(ref_data_dir) if ref_data_dir is not None else DEFAULT_REF_DATA_DIR
         training_path = (
-            Path(training_features).resolve()
+            resolve_path(training_features)
             if training_features is not None
-            else root / "lexile_test" / "deep_results" / "deep_features.csv"
+            else DEFAULT_TRAINING_FEATURES
         )
         try:
             nlp = spacy.load(spacy_model)
@@ -160,14 +175,12 @@ class LexileCalculator:
             fitted_model = self.models.route_model(level)
             model_lexile = self.models.predict(feature_row, fitted_model)
             to_lexile = model_lexile + TO_LEVEL_OFFSETS[level]
-            calibration_mode = f"known_level_route_offset:{level}"
             if level in {"P", "N"}:
                 warnings.append("P/N has no local TO offset calibration yet; offset 0.0 was used.")
         else:
             fitted_model = self.models.global_model()
             model_lexile = self.models.predict(feature_row, fitted_model)
             to_lexile = model_lexile + TO_GLOBAL_OFFSET
-            calibration_mode = f"global_offset:{TO_GLOBAL_OFFSET:+.1f}"
             warnings.append("No known_level was provided; TO level candidates use the global TO offset fallback.")
 
         candidates = level_candidates(to_lexile)
@@ -175,11 +188,8 @@ class LexileCalculator:
         return LexileResult(
             model_lexile=round(model_lexile, 1),
             to_calibrated_lexile=round(to_lexile, 1),
-            model_population=fitted_model.population,
-            model_name=fitted_model.model_name,
             top_level=top.level,
             top_segment=top.segment,
-            calibration_mode=calibration_mode,
             candidates=candidates,
             feature_summary=self._feature_summary(feature_row),
             warnings=warnings,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,14 @@ TO_LEVEL_OFFSETS: dict[str, float] = {
 # treated as a candidate-ranking aid, not as an official Lexile transformation.
 TO_GLOBAL_OFFSET = -220.0
 
+# Boundary zone for low/core/top labeling. Current supported-range MAE is
+# roughly 29-33L; P90 is too wide for 100L TO bands, so use a one-MAE margin.
+SEGMENT_BOUNDARY_MARGIN = 30.0
+
 LEVEL_ORDER = ("T", "H", "E", "O", "P", "N")
 
-MODEL_VERSION = "to-lexile-calc-v0.1"
+PACKAGE_DIR = Path(__file__).resolve().parent
+DEFAULT_REF_DATA_DIR = PACKAGE_DIR / "ref_data"
+DEFAULT_TRAINING_FEATURES = DEFAULT_REF_DATA_DIR / "training_features.csv"
 
+MODEL_VERSION = "to-lexile-calc-v0.1"

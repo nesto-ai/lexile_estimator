@@ -14,7 +14,7 @@ LLM을 사용하지 않고 `textstat`, `spaCy`, AoA/CEFR/SUBTLEX/wordfreq featur
 - 모델 원본 Lexile
 - TO Content Dev 보정 Lexile
 - `T/H/E/O/P/N` 레벨 후보
-- 각 후보의 `low/mid/top` 세부 위치
+- 각 후보의 `low/core/top` 세부 위치
 - 후보 rank와 band까지의 거리
 - 주요 feature 요약과 경고
 
@@ -28,18 +28,19 @@ python -m pip install -r shared/lexile_calc/requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
-필수 리소스는 프로젝트의 `data/` 폴더에 있어야 합니다.
+런타임 필수 리소스는 모듈 내부의 `ref_data/`에 CSV로 포함되어 있습니다.
+따라서 계산 시점에는 프로젝트 `data/*.xlsx` 원본이 필요하지 않습니다.
 
-- `AoA_51715_words.xlsx`
-- `CEFR,CEFR_J 데이터.xlsx`
-- `families.xlsx`
-- `SUBTLEXusExcel2007.xlsx`
+- `shared/lexile_calc/ref_data/aoa_lookup.csv`
+- `shared/lexile_calc/ref_data/cefr_lookup.csv`
+- `shared/lexile_calc/ref_data/academic_lemmas.csv`
+- `shared/lexile_calc/ref_data/subtlex_lookup.csv`
+- `shared/lexile_calc/ref_data/training_features.csv`
 
-학습 feature 파일은 기본적으로 다음 경로를 사용합니다.
+각 CSV는 기존 Excel/실험 파일에서 실제 계산에 쓰는 컬럼만 추출한 것입니다.
+원본 Excel은 재생성/검증용 자료이며, 모듈 실행 경로의 기본 의존성은 아닙니다.
 
-```text
-lexile_test/deep_results/deep_features.csv
-```
+필요하면 `ref_data_dir` 또는 `training_features`를 넘겨 다른 lookup/model feature 파일로 교체할 수 있습니다.
 
 ## 사용 방식
 
@@ -53,7 +54,7 @@ reality with great accuracy, many artists began to explore color, light, and fee
 instead of simply copying what they saw.
 """
 
-calc = LexileCalculator.from_project("/Users/cyyoon/dev/TO")
+calc = LexileCalculator.from_project()
 result = calc.analyze(text)
 
 print(result.model_lexile)
@@ -77,7 +78,7 @@ result = calc.analyze(text, known_level="H")
 from pathlib import Path
 from shared.lexile_calc import LexileCalculator
 
-calc = LexileCalculator.from_project("/Users/cyyoon/dev/TO")
+calc = LexileCalculator.from_project()
 
 rows = []
 for path in Path("inputs").glob("*.txt"):
@@ -105,18 +106,15 @@ result = calc.analyze(text, known_level="H")
 {
   "model_lexile": 885.3,
   "to_calibrated_lexile": 665.3,
-  "model_population": "all",
-  "model_name": "all_hgb",
   "top_level": "T",
-  "top_segment": "mid",
-  "calibration_mode": "global_offset:-220.0",
+  "top_segment": "core",
   "candidates": [
     {
       "level": "T",
       "range_low": 600.0,
       "range_high": 700.0,
       "lexile": 665.3,
-      "segment": "mid",
+      "segment": "core",
       "position": "inside",
       "distance_to_range": 0.0,
       "midpoint_distance": 15.3,
@@ -156,15 +154,16 @@ result = calc.analyze(text, known_level="H")
 
 P/N은 TO 교재 검증 데이터가 없어 아직 보정하지 않습니다.
 
-## low / mid / top
+## low / core / top
 
-각 레벨 band 내부를 3등분합니다.
+각 레벨 band를 단순 3등분하지 않습니다. 현재 supported 구간의 MAE가 대략 29-33L이고 P90는 54-72L입니다.
+P90를 boundary로 쓰면 100L band 전체가 boundary가 되므로, 인접 레벨로 흔들릴 수 있는 구간은 1 MAE 수준인 `30L`로 둡니다.
 
-- `low`: band 하단 1/3
-- `mid`: band 중간 1/3
-- `top`: band 상단 1/3
+- `low`: 해당 band에 들어왔지만 하단 boundary에서 30L 이내라 아래 레벨 가능성이 있는 구간
+- `core`: 양쪽 boundary에서 모두 30L보다 멀어 해당 레벨 중심부로 보는 구간
+- `top`: 해당 band에 들어왔지만 상단 boundary에서 30L 이내라 위 레벨 가능성이 있는 구간
 
-Lexile이 해당 band 밖이면 `position`은 `below` 또는 `above`로 표시됩니다. 그래도 가까운 후보 판단을 위해 `segment`는 해당 band 기준 위치로 계산합니다.
+Lexile이 해당 band 밖이면 `position`은 `below` 또는 `above`로 표시됩니다. 이 경우 `segment`는 후보 해석을 위해 `below -> low`, `above -> top`으로 표시합니다.
 
 ## 주의사항
 

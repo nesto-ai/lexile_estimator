@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from .config import DEFAULT_REF_DATA_DIR
+
 try:  # pragma: no cover - optional dependency path
     from wordfreq import zipf_frequency
 except ImportError:  # pragma: no cover
@@ -51,66 +53,87 @@ def load_textstat():
     return textstat
 
 
+def require_columns(df: pd.DataFrame, path: Path, columns: set[str]) -> None:
+    missing = sorted(columns - set(df.columns))
+    if missing:
+        raise LexileCalcError(f"{path} is missing required columns: {', '.join(missing)}")
+
+
+def optional_float(value: object) -> float | None:
+    if pd.isna(value):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return float(value)
+
+
+def bool_value(value: object) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
 def load_subtlex(path: Path) -> dict[str, float]:
     if not path.exists():
-        raise LexileCalcError(f"Missing SUBTLEX file: {path}")
-    df = pd.read_excel(path, sheet_name="out1g", usecols=["Word", "Lg10WF"])
+        raise LexileCalcError(f"Missing SUBTLEX lookup file: {path}")
+    df = pd.read_csv(path, keep_default_na=False)
+    require_columns(df, path, {"word", "lg10wf"})
     return {
-        str(word).strip().lower(): float(freq)
-        for word, freq in zip(df["Word"], df["Lg10WF"], strict=False)
-        if str(word).strip()
+        norm(word): float(freq)
+        for word, freq in zip(df["word"], df["lg10wf"], strict=False)
+        if norm(word) and not pd.isna(freq)
     }
 
 
-def load_resources(data_dir: Path) -> LexicalResources:
-    aoa_path = data_dir / "AoA_51715_words.xlsx"
-    cefr_path = data_dir / "CEFR,CEFR_J 데이터.xlsx"
-    families_path = data_dir / "families.xlsx"
-    subtlex_path = data_dir / "SUBTLEXusExcel2007.xlsx"
-    missing = [str(path) for path in (aoa_path, cefr_path, families_path, subtlex_path) if not path.exists()]
+def load_resources(ref_data_dir: Path | None = None) -> LexicalResources:
+    ref_data_path = Path(ref_data_dir) if ref_data_dir is not None else DEFAULT_REF_DATA_DIR
+    aoa_path = ref_data_path / "aoa_lookup.csv"
+    cefr_path = ref_data_path / "cefr_lookup.csv"
+    academic_path = ref_data_path / "academic_lemmas.csv"
+    subtlex_path = ref_data_path / "subtlex_lookup.csv"
+    missing = [str(path) for path in (aoa_path, cefr_path, academic_path, subtlex_path) if not path.exists()]
     if missing:
         raise LexileCalcError(f"Missing resource files: {', '.join(missing)}")
 
-    aoa_df = pd.read_excel(aoa_path, sheet_name="Sheet1")
-    cefr_df = pd.read_excel(cefr_path, sheet_name="CEFR")
-    cefrj_df = pd.read_excel(cefr_path, sheet_name="CEFR_J")
-    fam_df = pd.read_excel(families_path, sheet_name="data")
+    aoa_df = pd.read_csv(aoa_path, keep_default_na=False)
+    cefr_df = pd.read_csv(cefr_path, keep_default_na=False)
+    academic_df = pd.read_csv(academic_path, keep_default_na=False)
+    require_columns(aoa_df, aoa_path, {"lemma", "aoa", "freq_pm_sum", "known"})
+    require_columns(cefr_df, cefr_path, {"lemma", "level"})
+    require_columns(academic_df, academic_path, {"lemma", "is_domain_academic"})
 
     aoa_lookup: dict[str, dict[str, float | None]] = {}
-    lemma_series = aoa_df["Lemma_highest_PoS"].map(norm)
-    for lemma, group in aoa_df.dropna(subset=["Lemma_highest_PoS"]).groupby(lemma_series):
+    for _, row in aoa_df.iterrows():
+        lemma = norm(row["lemma"])
         if not lemma:
             continue
-        aoa_vals = group["AoA_Kup_lem"].dropna().astype(float)
-        freq_vals = group["Freq_pm"].dropna().astype(float)
-        known_vals = group["Perc_known_lem"].dropna().astype(float)
-        if len(aoa_vals) == 0:
+        aoa = optional_float(row["aoa"])
+        if aoa is None:
             continue
         aoa_lookup[lemma] = {
-            "aoa": float(aoa_vals.iloc[0]),
-            "freq_pm_sum": float(freq_vals.sum()) if len(freq_vals) else None,
-            "known": float(known_vals.iloc[0]) if len(known_vals) else None,
+            "aoa": aoa,
+            "freq_pm_sum": optional_float(row["freq_pm_sum"]),
+            "known": optional_float(row["known"]),
         }
 
     cefr_lookup: dict[str, str] = {}
-    for level_col, df in (("CEFR", cefr_df), ("CEFR_J", cefrj_df)):
-        for _, row in df.iterrows():
-            level = row.get(level_col)
-            if pd.isna(level):
-                continue
-            for form in re.split(r"[/,;]", norm(row.get("headword"))):
-                form = form.strip()
-                if not form:
-                    continue
-                current = cefr_lookup.get(form)
-                if current is None or CEFR_ORDER.get(str(level), 99) < CEFR_ORDER.get(str(current), 99):
-                    cefr_lookup[form] = str(level)
+    for _, row in cefr_df.iterrows():
+        lemma = norm(row["lemma"])
+        level = str(row["level"]).strip()
+        if lemma and level:
+            cefr_lookup[lemma] = level
 
-    academic_lemmas = set(fam_df["family"].dropna().map(norm)) | set(fam_df["word"].dropna().map(norm))
-    domain_rows = fam_df[fam_df["domain"].notna()]
-    domain_academic_lemmas = set(domain_rows["family"].dropna().map(norm)) | set(
-        domain_rows["word"].dropna().map(norm)
-    )
+    academic_lemmas: set[str] = set()
+    domain_academic_lemmas: set[str] = set()
+    for _, row in academic_df.iterrows():
+        lemma = norm(row["lemma"])
+        if not lemma:
+            continue
+        academic_lemmas.add(lemma)
+        if bool_value(row["is_domain_academic"]):
+            domain_academic_lemmas.add(lemma)
 
     return LexicalResources(
         aoa=aoa_lookup,
@@ -398,4 +421,3 @@ class FeatureExtractor:
                 row[feature_name] = 0.0
         word_count = max(1.0, float(row.get("text_words") or 0.0))
         row["textstat_difficult_words_ratio"] = round(ratio(float(row["textstat_difficult_words"]), word_count), 4)
-
